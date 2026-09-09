@@ -1,0 +1,154 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Face Registration Test</title>
+</head>
+
+<body>
+
+    <h2>Face Registration Test</h2>
+
+    <p>Student ID: 1 (Rahul Kumar)</p>
+
+    <input
+        type="file"
+        id="photo"
+        accept="image/*"
+    >
+
+    <br><br>
+
+    <button onclick="registerFace()">
+        Register Face
+    </button>
+
+    <p id="message"></p>
+
+    <script>
+
+        async function registerFace() {
+
+            const photoInput =
+                document.getElementById("photo");
+
+            const message =
+                document.getElementById("message");
+
+            if (!photoInput.files.length) {
+                message.innerText =
+                    "Please select a photo first.";
+                return;
+            }
+
+            message.innerText =
+                "Processing face...";
+
+            try {
+
+                // Step 1:
+                // Send photo to AI service
+
+                const formData =
+                    new FormData();
+
+                formData.append(
+                    "file",
+                    photoInput.files[0]
+                );
+
+                const aiResponse =
+                    await fetch(
+                        "http://127.0.0.1:8000/encode-face",
+                        {
+                            method: "POST",
+                            body: formData
+                        }
+                    );
+
+                const aiData =
+                    await aiResponse.json();
+
+                if (
+                    !aiResponse.ok ||
+                    !aiData.success
+                ) {
+                    message.innerText =
+                        aiData.message ||
+                        "Face recognition failed.";
+
+                    return;
+                }
+
+                // Step 2:
+                // Get the face encoding
+
+                const encoding =
+                    aiData.encoding;
+
+                // Step 3:
+                // Ask user to provide login token
+
+                const token =
+                    localStorage.getItem("token");
+
+                if (!token) {
+
+                    message.innerText =
+                        "Login token not found. Please log in to the application first.";
+
+                    return;
+                }
+
+                // Step 4:
+                // Send encoding to Node backend
+
+                const backendResponse =
+                    await fetch(
+                        "http://localhost:5000/api/face-recognition/register/1",
+                        {
+                            method: "POST",
+
+                            headers: {
+                                "Content-Type":
+                                    "application/json",
+
+                                "Authorization":
+                                    "Bearer " + token
+                            },
+
+                            body: JSON.stringify({
+                                encoding: encoding
+                            })
+                        }
+                    );
+
+                const backendData =
+                    await backendResponse.json();
+
+                if (
+                    !backendResponse.ok ||
+                    !backendData.success
+                ) {
+                    message.innerText =
+                        backendData.message ||
+                        "Face registration failed.";
+
+                    return;
+                }
+
+                message.innerText =
+                    "Face registered successfully!";
+
+            } catch (error) {
+
+                console.error(error);
+
+                message.innerText =
+                    "Unable to connect to AI service or backend.";
+            }
+        }
+
+    </script>
+
+</body>
+</html>
