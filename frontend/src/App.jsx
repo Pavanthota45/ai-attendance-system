@@ -176,6 +176,9 @@ function App() {
     const [attendanceSession, setAttendanceSession] =
         useState(null);
 
+    const [endedAttendanceSession, setEndedAttendanceSession] =
+        useState(null);
+
     const [attendanceMessage, setAttendanceMessage] =
         useState("");
 
@@ -1187,7 +1190,7 @@ function App() {
                     if (studentId) {
                         initialStatuses[
                             studentId
-                        ] = "PRESENT";
+                        ] = "ABSENT";
                     }
                 }
             );
@@ -1221,6 +1224,7 @@ function App() {
         setAttendanceStudents([]);
         setAttendanceStatuses({});
         setAttendanceSession(null);
+        setEndedAttendanceSession(null);
         setAttendanceMessage("");
 
         if (!assignmentId) {
@@ -1254,7 +1258,8 @@ function App() {
 
     const loadExistingAttendanceSession = async (
         existingSession,
-        assignment
+        assignment,
+        preserveAttendance = false
     ) => {
         if (!existingSession) {
             setAttendanceMessage(
@@ -1293,18 +1298,69 @@ function App() {
             return;
         }
 
+        await loadAttendanceStudents(
+            assignment.class_id
+        );
+
+        if (preserveAttendance) {
+            try {
+                const attendanceResponse = await fetch(
+                    `${API_URL}/api/attendance/session/${sessionId}`,
+                    {
+                        headers: getHeaders()
+                    }
+                );
+
+                const attendanceData =
+                    await attendanceResponse.json();
+
+                if (
+                    attendanceResponse.ok &&
+                    attendanceData.success
+                ) {
+                    const existingStatuses = {};
+
+                    (attendanceData.data || []).forEach(
+                        (record) => {
+                            const studentId =
+                                record.student_id ??
+                                record.id;
+
+                            if (studentId && record.status) {
+                                existingStatuses[
+                                    studentId
+                                ] = record.status;
+                            }
+                        }
+                    );
+
+                    setAttendanceStatuses(
+                        (previous) => ({
+                            ...previous,
+                            ...existingStatuses
+                        })
+                    );
+                }
+            } catch (error) {
+                console.error(
+                    "Error loading existing attendance:",
+                    error
+                );
+            }
+        }
+
         setAttendanceSession({
             ...existingSession,
             id: Number(sessionId),
             session_id: Number(sessionId)
         });
 
-        await loadAttendanceStudents(
-            assignment.class_id
-        );
+        setEndedAttendanceSession(null);
 
         setAttendanceMessage(
-            "Existing attendance session loaded successfully!"
+            preserveAttendance
+                ? "Today's attendance session reopened successfully. Previous attendance has been preserved."
+                : "Existing attendance session loaded successfully!"
         );
     };
 
@@ -1390,10 +1446,24 @@ function App() {
                 response.status === 409 &&
                 data.existingSession
             ) {
-                await loadExistingAttendanceSession(
-                    data.existingSession,
-                    assignment
-                );
+                if (data.sessionType === "ENDED") {
+                    setAttendanceSession(null);
+                    setEndedAttendanceSession(
+                        data.existingSession
+                    );
+                    stopRecognitionCamera();
+                    setAttendanceMessage(
+                        data.message ||
+                        "Today's attendance session has ended. You can reopen it today."
+                    );
+                } else {
+                    await loadExistingAttendanceSession(
+                        data.existingSession,
+                        assignment,
+                        false
+                    );
+                }
+
                 return;
             }
 
@@ -1410,7 +1480,8 @@ function App() {
             ) {
                 await loadExistingAttendanceSession(
                     data.existingSession,
-                    assignment
+                    assignment,
+                    false
                 );
                 return;
             }
@@ -1431,12 +1502,29 @@ function App() {
                         data.id
                 };
 
-            setAttendanceSession(
-                newSession
+            setAttendanceSession({
+                ...newSession,
+                id: Number(
+                    newSession.id ??
+                    newSession.session_id ??
+                    newSession.sessionId
+                ),
+                session_id: Number(
+                    newSession.id ??
+                    newSession.session_id ??
+                    newSession.sessionId
+                )
+            });
+
+            setEndedAttendanceSession(null);
+
+            // Every student starts ABSENT in a brand-new session.
+            await loadAttendanceStudents(
+                assignment.class_id
             );
 
             setAttendanceMessage(
-                "Attendance session created successfully!"
+                "Attendance session created successfully. All students are ABSENT until recognized by camera."
             );
 
         } catch (error) {
@@ -1444,6 +1532,94 @@ function App() {
 
             setAttendanceMessage(
                 "Unable to create attendance session"
+            );
+        } finally {
+            setAttendanceLoading(false);
+        }
+    };
+
+    // =========================================================
+    // REOPEN TODAY'S ATTENDANCE SESSION
+    // =========================================================
+
+    const reopenAttendanceSession = async () => {
+        if (!endedAttendanceSession) {
+            return;
+        }
+
+        const sessionId =
+            endedAttendanceSession.id ??
+            endedAttendanceSession.session_id ??
+            endedAttendanceSession.sessionId;
+
+        if (!sessionId) {
+            setAttendanceMessage(
+                "Attendance session ID was not found."
+            );
+            return;
+        }
+
+        const assignment =
+            attendanceAssignments.find(
+                (item) =>
+                    String(
+                        getAssignmentId(item)
+                    ) ===
+                    String(
+                        selectedAttendanceAssignment
+                    )
+            );
+
+        if (!assignment) {
+            setAttendanceMessage(
+                "Assignment not found."
+            );
+            return;
+        }
+
+        setAttendanceLoading(true);
+        setAttendanceMessage("");
+
+        try {
+            const response = await fetch(
+                `${API_URL}/api/attendance-sessions/${sessionId}/reopen`,
+                {
+                    method: "PUT",
+                    headers: getHeaders()
+                }
+            );
+
+            const data =
+                await response.json();
+
+            if (
+                !response.ok ||
+                !data.success
+            ) {
+                setAttendanceMessage(
+                    data.message ||
+                    "Unable to reopen attendance session."
+                );
+                return;
+            }
+
+            const reopenedSession =
+                data.data || endedAttendanceSession;
+
+            await loadExistingAttendanceSession(
+                reopenedSession,
+                assignment,
+                true
+            );
+
+        } catch (error) {
+            console.error(
+                "Reopen attendance session error:",
+                error
+            );
+
+            setAttendanceMessage(
+                "Unable to reopen attendance session."
             );
         } finally {
             setAttendanceLoading(false);
@@ -1509,7 +1685,8 @@ function App() {
              *
              * {
              *     student_id: number,
-             *     status: "PRESENT"
+             *     status: "ABSENT" by default,
+             *     changed to "PRESENT" only after face recognition
              * }
              *
              * This fixes:
@@ -1530,7 +1707,7 @@ function App() {
                                 student.id ??
                                 student.student_id
                             ] ||
-                            "PRESENT";
+                            "ABSENT";
 
                         return {
                             student_id:
@@ -1680,8 +1857,26 @@ function App() {
                 return;
             }
 
+            setEndedAttendanceSession({
+                ...attendanceSession,
+                ...(data.data || {}),
+                id: Number(
+                    data.data?.id ??
+                    attendanceSession.id ??
+                    attendanceSession.session_id
+                ),
+                session_id: Number(
+                    data.data?.id ??
+                    attendanceSession.id ??
+                    attendanceSession.session_id
+                )
+            });
+
+            setAttendanceSession(null);
+            stopRecognitionCamera();
+
             setAttendanceMessage(
-                "Attendance session ended successfully!"
+                "Attendance session ended successfully. You can reopen it today if needed."
             );
 
         } catch (error) {
@@ -3862,12 +4057,9 @@ function App() {
                                             ) ||
                                             index
                                         }
-                                        style={{
-                                            ...infoCardStyle,
-                                            border: "1px solid #e2e8f0",
-                                            boxShadow: "0 6px 18px rgba(15, 23, 42, 0.06)",
-                                            minHeight: "130px"
-                                        }}
+                                        style={
+                                            infoCardStyle
+                                        }
                                     >
 
                                         <h3>
@@ -4283,7 +4475,8 @@ function App() {
                             )}
 
                             {selectedAttendanceAssignment &&
-                                !attendanceSession && (
+                                !attendanceSession &&
+                                !endedAttendanceSession && (
                                     <button
                                         onClick={
                                             createAttendanceSession
@@ -4297,6 +4490,50 @@ function App() {
                                     >
                                         Create / Load Today's Attendance Session
                                     </button>
+                                )}
+
+                            {selectedAttendanceAssignment &&
+                                endedAttendanceSession && (
+                                    <div
+                                        style={{
+                                            background: "#fff3cd",
+                                            border: "1px solid #ffe69c",
+                                            padding: "18px",
+                                            borderRadius: "10px",
+                                            marginTop: "15px"
+                                        }}
+                                    >
+                                        <h3
+                                            style={{
+                                                marginTop: 0,
+                                                color: "#856404"
+                                            }}
+                                        >
+                                            Today's Session Has Ended
+                                        </h3>
+
+                                        <p
+                                            style={{
+                                                color: "#856404"
+                                            }}
+                                        >
+                                            This is the same attendance session. Reopening it will preserve students already marked PRESENT and keep the remaining students ABSENT.
+                                        </p>
+
+                                        <button
+                                            onClick={
+                                                reopenAttendanceSession
+                                            }
+                                            disabled={
+                                                attendanceLoading
+                                            }
+                                            style={
+                                                primaryButtonStyle
+                                            }
+                                        >
+                                            Reopen Today's Session
+                                        </button>
+                                    </div>
                                 )}
 
                         </div>
@@ -4685,7 +4922,7 @@ function App() {
                 {!showStudentAttendance && (
                     <div>
 
-                        <h2 style={sectionTitleStyle}>
+                        <h2>
                             Student Menu
                         </h2>
 
@@ -4755,12 +4992,9 @@ function App() {
                                 >
 
                                     <div
-                                        style={{
-                                            ...infoCardStyle,
-                                            border: "1px solid #e2e8f0",
-                                            boxShadow: "0 6px 18px rgba(15, 23, 42, 0.06)",
-                                            minHeight: "130px"
-                                        }}
+                                        style={
+                                            infoCardStyle
+                                        }
                                     >
 
                                         <h3>
@@ -4783,12 +5017,9 @@ function App() {
                                     </div>
 
                                     <div
-                                        style={{
-                                            ...infoCardStyle,
-                                            border: "1px solid #e2e8f0",
-                                            boxShadow: "0 6px 18px rgba(15, 23, 42, 0.06)",
-                                            minHeight: "130px"
-                                        }}
+                                        style={
+                                            infoCardStyle
+                                        }
                                     >
 
                                         <h3>
